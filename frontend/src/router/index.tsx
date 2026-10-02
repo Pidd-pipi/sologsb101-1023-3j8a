@@ -13,6 +13,7 @@ const FixRecord = lazy(() => import('../pages/FixRecord'));
 const RoastPlan = lazy(() => import('../pages/RoastPlan'));
 const ReviewBoard = lazy(() => import('../pages/ReviewBoard'));
 const BlendPlan = lazy(() => import('../pages/BlendPlan'));
+const ScheduleConsole = lazy(() => import('../pages/ScheduleConsole'));
 
 /** 全部路由路径（逐字固定，禁止改动） */
 export const ROUTES = {
@@ -22,6 +23,7 @@ export const ROUTES = {
   roasting: '/roasting',
   reviews: '/reviews',
   blending: '/blending',
+  schedule: '/schedule',
 } as const;
 
 /** 导航标题：App 依据当前路径设置 document.title */
@@ -32,6 +34,7 @@ export const ROUTE_META: Record<string, string> = {
   [ROUTES.roasting]: '焙火曲线与复焙安排',
   [ROUTES.reviews]: '毛茶审评',
   [ROUTES.blending]: '拼配方案登记',
+  [ROUTES.schedule]: '工位调度台',
 };
 
 /** 侧边导航顺序 */
@@ -42,6 +45,7 @@ export const NAV_ORDER: string[] = [
   ROUTES.roasting,
   ROUTES.reviews,
   ROUTES.blending,
+  ROUTES.schedule,
 ];
 
 /** 懒加载页面占位 */
@@ -66,6 +70,7 @@ export const appRoutes: RouteObject[] = [
       { path: 'roasting', element: withSuspense(<RoastPlan />) },
       { path: 'reviews', element: withSuspense(<ReviewBoard />) },
       { path: 'blending', element: withSuspense(<BlendPlan />) },
+      { path: 'schedule', element: withSuspense(<ScheduleConsole />) },
       { path: '*', element: <Navigate to={ROUTES.gardens} replace /> },
     ],
   },

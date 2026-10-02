@@ -11,12 +11,14 @@ import {
   FireOutlined,
   GoldOutlined,
   ProfileOutlined,
+  ScheduleOutlined,
   StarOutlined,
 } from '@ant-design/icons';
 import { NAV_ORDER, ROUTES, ROUTE_META } from './router';
 import { useGardenStore } from './stores/gardenStore';
 import { useBatchStore } from './stores/batchStore';
 import { useRoastStore } from './stores/roastStore';
+import { useScheduleStore } from './stores/scheduleStore';
 import { initDatabase } from './utils/db';
 import { batchLabel } from './utils/tea';
 
@@ -30,6 +32,7 @@ const NAV_ICON: Record<string, ReactNode> = {
   '/roasting': <FireOutlined />,
   '/reviews': <StarOutlined />,
   '/blending': <ProfileOutlined />,
+  '/schedule': <ScheduleOutlined />,
 };
 
 export default function App() {
@@ -49,6 +52,8 @@ export default function App() {
   const loadReviews = useBatchStore((state) => state.loadReviews);
 
   const loadRoasts = useRoastStore((state) => state.loadRoasts);
+  const loadScheduleOrders = useScheduleStore((state) => state.loadOrders);
+  const startHeartbeat = useScheduleStore((state) => state.startHeartbeat);
 
   // 首次进入：打开数据库（必要时播种）→ 加载各 store 的跨页数据
   useEffect(() => {
@@ -57,7 +62,10 @@ export default function App() {
       try {
         await initDatabase();
         if (cancelled) return;
-        await Promise.all([loadGardens(), loadBatches(), loadRoasts(), loadReviews()]);
+        await Promise.all([loadGardens(), loadBatches(), loadRoasts(), loadReviews(), loadScheduleOrders()]);
+        // 启动工位调度心跳（页面关闭释放、超时自动释放、过期会话清理）
+        const stopHeartbeat = startHeartbeat();
+        if (cancelled) stopHeartbeat();
       } catch (error) {
         if (cancelled) return;
         messageApi.error(`本地数据库初始化失败：${error instanceof Error ? error.message : '未知错误'}`);
@@ -66,7 +74,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadBatches, loadGardens, loadReviews, loadRoasts, messageApi]);
+  }, [loadBatches, loadGardens, loadReviews, loadRoasts, loadScheduleOrders, messageApi, startHeartbeat]);
 
   // 导航标题（每个路由带 meta.title 的等价实现）
   useEffect(() => {

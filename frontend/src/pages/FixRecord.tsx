@@ -30,6 +30,7 @@ import EmptyPanel from '../components/common/EmptyPanel';
 import { useIdbTable } from '../hooks/useIdbTable';
 import { useGardenStore } from '../stores/gardenStore';
 import { filterFixes, useBatchStore } from '../stores/batchStore';
+import { useScheduleStore } from '../stores/scheduleStore';
 import { db } from '../utils/db';
 import { FIX_LIMITS, ROLL_PRESSURE_OPTIONS, type Fix, type FixDraft } from '../types/fix';
 import { batchLabel, judgeFixLevel, roundTo } from '../utils/tea';
@@ -45,6 +46,9 @@ export default function FixRecord() {
   const resetFixFilters = useBatchStore((state) => state.resetFixFilters);
   const markBatchState = useBatchStore((state) => state.markBatchState);
   const loadBatches = useBatchStore((state) => state.loadBatches);
+
+  const scheduleInfoForBatch = useScheduleStore((state) => state.infoForBatch);
+  const releaseScheduleOrder = useScheduleStore((state) => state.releaseOrder);
 
   const fixesTable = useIdbTable<Fix>(db.fixes, { prefix: 'fix', sort: (a, b) => b.createdAt.localeCompare(a.createdAt) });
 
@@ -132,6 +136,12 @@ export default function FixRecord() {
       setEditingFix(null);
       await loadBatches();
     } catch (error) {
+      // 保存失败：释放该批次占用中的工位，保留原队位，可重试
+      const info = scheduleInfoForBatch(values.batchId);
+      if (info.status === 'occupied' && info.orderId) {
+        await releaseScheduleOrder(info.orderId, '杀青记录保存失败，系统自动释放');
+        message.warning('保存失败，工位已释放（保留原队位，可重试）');
+      }
       message.error(error instanceof Error ? error.message : '杀青揉捻记录保存失败');
     }
   };
@@ -217,6 +227,34 @@ export default function FixRecord() {
       render: (_: unknown, row) => {
         const batch = batchMap.get(row.batchId);
         return batch ? <GradeTag kind="state" value={batch.state} /> : '—';
+      },
+    },
+    {
+      title: '工位调度',
+      key: 'schedule',
+      width: 160,
+      render: (_: unknown, row) => {
+        const info = scheduleInfoForBatch(row.batchId);
+        if (!info.status) return <Tag>未排队</Tag>;
+        if (info.status === 'queued') {
+          return (
+            <Space size={4} wrap>
+              <Tag color="processing">排队中</Tag>
+              {info.queueRank !== null && <Tag color="volcano">第 {info.queueRank} 位</Tag>}
+            </Space>
+          );
+        }
+        if (info.status === 'occupied') {
+          return (
+            <Space size={4} wrap>
+              <Tag color="gold">占用中</Tag>
+            </Space>
+          );
+        }
+        if (info.status === 'released' || info.status === 'exception') {
+          return <Tag color="red">已释放</Tag>;
+        }
+        return <Tag color="green">已完成</Tag>;
       },
     },
     {

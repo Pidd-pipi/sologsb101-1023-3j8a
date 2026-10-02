@@ -37,6 +37,7 @@ import StatBadge from '../components/common/StatBadge';
 import EmptyPanel from '../components/common/EmptyPanel';
 import { useGardenStore } from '../stores/gardenStore';
 import { useBatchStore } from '../stores/batchStore';
+import { useScheduleStore } from '../stores/scheduleStore';
 import {
   buildReminders,
   filterRoasts,
@@ -75,6 +76,9 @@ export default function RoastPlan() {
   const deleteRoast = useRoastStore((state) => state.deleteRoast);
   const advanceRoastState = useRoastStore((state) => state.advanceRoastState);
   const movePass = useRoastStore((state) => state.movePass);
+
+  const scheduleInfoForBatch = useScheduleStore((state) => state.infoForBatch);
+  const releaseScheduleOrder = useScheduleStore((state) => state.releaseOrder);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRoast, setEditingRoast] = useState<Roast | null>(null);
@@ -182,6 +186,12 @@ export default function RoastPlan() {
       setModalOpen(false);
       setEditingRoast(null);
     } catch (error) {
+      // 保存失败：释放该批次占用中的工位，保留原队位，可重试
+      const info = scheduleInfoForBatch(values.batchId);
+      if (info.status === 'occupied' && info.orderId) {
+        await releaseScheduleOrder(info.orderId, '焙火安排保存失败，系统自动释放');
+        message.warning('保存失败，工位已释放（保留原队位，可重试）');
+      }
       message.error(error instanceof Error ? error.message : '焙火记录保存失败');
     }
   };
@@ -323,6 +333,21 @@ export default function RoastPlan() {
                       <span>{labelOfBatch(group.batchId)}</span>
                       <GradeTag kind="fire" value={fireLevel} />
                       {fullFire ? <Tag color="volcano">足火判定通过</Tag> : null}
+                      {(() => {
+                        const info = scheduleInfoForBatch(group.batchId);
+                        if (!info.status) return <Tag>未排队</Tag>;
+                        if (info.status === 'queued') {
+                          return (
+                            <Tag color="processing">
+                              排队中{info.queueRank !== null ? ` · 第 ${info.queueRank} 位` : ''}
+                            </Tag>
+                          );
+                        }
+                        if (info.status === 'occupied') return <Tag color="gold">占用中</Tag>;
+                        if (info.status === 'released' || info.status === 'exception')
+                          return <Tag color="red">已释放</Tag>;
+                        return <Tag color="green">已完成</Tag>;
+                      })()}
                     </Space>
                   }
                   extra={

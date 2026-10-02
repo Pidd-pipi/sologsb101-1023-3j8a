@@ -23,6 +23,7 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -41,6 +42,7 @@ import EmptyPanel from '../components/common/EmptyPanel';
 import { useTurnTimeline } from '../hooks/useTurnTimeline';
 import { filterGardens, useGardenStore } from '../stores/gardenStore';
 import { useBatchStore } from '../stores/batchStore';
+import { useScheduleStore } from '../stores/scheduleStore';
 import { ALTITUDE_BANDS, CULTIVAR_OPTIONS, SOIL_OPTIONS, type Garden, type GardenDraft } from '../types/garden';
 import { BATCH_STATES, TENDERNESS_OPTIONS, type Batch, type BatchDraft } from '../types/batch';
 import {
@@ -82,6 +84,8 @@ export default function GardenList() {
   const advanceBatchState = useBatchStore((state) => state.advanceBatchState);
   const loadBatches = useBatchStore((state) => state.loadBatches);
   const loadReviews = useBatchStore((state) => state.loadReviews);
+
+  const scheduleInfoForBatch = useScheduleStore((state) => state.infoForBatch);
 
   const [gardenModalOpen, setGardenModalOpen] = useState(false);
   const [editingGarden, setEditingGarden] = useState<Garden | null>(null);
@@ -292,6 +296,47 @@ export default function GardenList() {
       dataIndex: 'state',
       width: 120,
       render: (value: Batch['state']) => <GradeTag kind="state" value={value} />,
+    },
+    {
+      title: '工位调度',
+      key: 'schedule',
+      width: 180,
+      render: (_: unknown, batch: Batch) => {
+        const info = scheduleInfoForBatch(batch.id);
+        if (!info.status) {
+          return <Tag>未排队</Tag>;
+        }
+        if (info.status === 'queued') {
+          return (
+            <Space size={4} wrap>
+              <Tag color="processing">排队中</Tag>
+              {info.queueRank !== null && <Tag color="volcano">第 {info.queueRank} 位</Tag>}
+            </Space>
+          );
+        }
+        if (info.status === 'occupied') {
+          return (
+            <Space size={4} wrap>
+              <Tag color="gold">占用中</Tag>
+              {info.rollerName && <Tag>{info.rollerName}</Tag>}
+              {info.ovenName && <Tag>{info.ovenName}</Tag>}
+            </Space>
+          );
+        }
+        if (info.status === 'released' || info.status === 'exception') {
+          return (
+            <Space size={4} wrap>
+              <Tag color="red">已释放</Tag>
+              {info.exceptionReason && (
+                <Tooltip title={info.exceptionReason}>
+                  <Tag color="default">异常</Tag>
+                </Tooltip>
+              )}
+            </Space>
+          );
+        }
+        return <Tag color="green">已完成</Tag>;
+      },
     },
     {
       title: '操作',

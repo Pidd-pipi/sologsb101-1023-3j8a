@@ -12,13 +12,14 @@ import { TURN_LIMITS, type Turn } from '../types/turn';
 import type { Fix } from '../types/fix';
 import { ROAST_STATES, type Roast } from '../types/roast';
 import type { Review } from '../types/review';
+import type { ScheduleOrder } from '../types/schedule';
 import { clampScore, weightedTotalScore } from './tea';
 
 /** 数据库名 = 英文短名 */
 export const DB_NAME = 'gbtearock';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 /** 主键前缀，便于在导出 JSON 里肉眼区分实体 */
 export const ID_PREFIX = {
@@ -28,6 +29,7 @@ export const ID_PREFIX = {
   fix: 'fix',
   roast: 'roast',
   review: 'review',
+  schedule: 'sched',
 } as const;
 
 class TeaRockDatabase extends Dexie {
@@ -37,6 +39,7 @@ class TeaRockDatabase extends Dexie {
   fixes!: Table<Fix, string>;
   roasts!: Table<Roast, string>;
   reviews!: Table<Review, string>;
+  scheduleOrders!: Table<ScheduleOrder, string>;
 
   constructor() {
     super(DB_NAME);
@@ -55,7 +58,7 @@ class TeaRockDatabase extends Dexie {
     //     1) 补齐 createdAt / updatedAt；2) 山场补齐朝向、土壤与品种兜底值；
     //     3) 批次工序状态归一化；4) 轮次与焙火数值截断到合法区间；
     //     5) 审评总分由「四项简单平均」改为「分项加权换算」，迁移时按新权重重算。
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         gardens: 'id, name, cultivar, soil, altitudeM, createdAt, updatedAt',
         batches: 'id, gardenId, pickedAt, state, tenderness, createdAt, updatedAt',
@@ -153,6 +156,25 @@ class TeaRockDatabase extends Dexie {
               leafBase: row.leafBase,
             });
           });
+      });
+
+    // v3：新增工位调度单表（scheduleOrders），支持杀青揉捻与焙火安排的工位占用调度。
+    //     纯新增表，无需改写历史数据；旧批次没有调度单时按「未排队」展示。
+    this.version(3)
+      .stores({
+        gardens: 'id, name, cultivar, soil, altitudeM, createdAt, updatedAt',
+        batches: 'id, gardenId, pickedAt, state, tenderness, createdAt, updatedAt',
+        turns: 'id, batchId, roundNo, [batchId+roundNo], createdAt, updatedAt',
+        fixes: 'id, batchId, operator, createdAt, updatedAt',
+        roasts: 'id, batchId, passNo, state, nextRoastDate, createdAt, updatedAt',
+        reviews: 'id, batchId, reviewedAt, totalScore, createdAt, updatedAt',
+        scheduleOrders: 'id, batchId, status, queueNo, process, ownerSessionId, submittedAt, createdAt, updatedAt',
+      })
+      .upgrade(async (tx) => {
+        // v3 纯新增表，无历史数据迁移；旧批次无调度单即「未排队」
+        await tx.table('scheduleOrders').toCollection().modify(() => {
+          // no-op：保留空迁移占位，便于后续版本追溯
+        });
       });
   }
 }
@@ -433,13 +455,50 @@ export async function seedDatabase(): Promise<void> {
     }),
   }));
 
-  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews], async () => {
+  // 演示调度单：一条排队中（做青中批次）、一条占用中（已杀青批次）
+  const scheduleOrders: ScheduleOrder[] = [
+    {
+      id: 'sched-seed-queued',
+      batchId: 'batch-matouyan-0512',
+      process: 'fix',
+      queueNo: 1,
+      status: 'queued',
+      rollerId: null,
+      ovenId: null,
+      occupiedAt: null,
+      expiresAt: null,
+      exceptionReason: '',
+      submittedAt: stamp,
+      ownerSessionId: null,
+      createdAt: stamp,
+      updatedAt: stamp,
+    },
+    {
+      id: 'sched-seed-occupied',
+      batchId: 'batch-matouyan-0508',
+      process: 'roast',
+      queueNo: 1,
+      status: 'occupied',
+      rollerId: 'roller-1',
+      ovenId: 'oven-1',
+      occupiedAt: stamp,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      exceptionReason: '',
+      submittedAt: stamp,
+      ownerSessionId: null,
+      createdAt: stamp,
+      updatedAt: stamp,
+    },
+  ];
+
+  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews, db.scheduleOrders], async () => {
     if ((await db.gardens.count()) === 0) await db.gardens.bulkPut(gardens);
     if ((await db.batches.count()) === 0) await db.batches.bulkPut(batches);
     if ((await db.turns.count()) === 0) await db.turns.bulkPut(turns);
     if ((await db.fixes.count()) === 0) await db.fixes.bulkPut(fixes);
     if ((await db.roasts.count()) === 0) await db.roasts.bulkPut(roasts);
     if ((await db.reviews.count()) === 0) await db.reviews.bulkPut(reviews);
+    if ((await db.scheduleOrders.count()) === 0) await db.scheduleOrders.bulkPut(scheduleOrders);
   });
 }
 
@@ -484,9 +543,9 @@ export async function putGarden(row: Garden): Promise<void> {
   await db.gardens.put(row);
 }
 
-/** 删除山场：级联删除其批次及批次下的轮次 / 杀青 / 焙火 / 审评 */
+/** 删除山场：级联删除其批次及批次下的轮次 / 杀青 / 焙火 / 审评 / 调度单 */
 export async function removeGarden(id: string): Promise<void> {
-  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews], async () => {
+  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews, db.scheduleOrders], async () => {
     const batches = await db.batches.where('gardenId').equals(id).toArray();
     const batchIds = batches.map((batch) => batch.id);
     if (batchIds.length > 0) {
@@ -494,6 +553,7 @@ export async function removeGarden(id: string): Promise<void> {
       await db.fixes.where('batchId').anyOf(batchIds).delete();
       await db.roasts.where('batchId').anyOf(batchIds).delete();
       await db.reviews.where('batchId').anyOf(batchIds).delete();
+      await db.scheduleOrders.where('batchId').anyOf(batchIds).delete();
       await db.batches.where('gardenId').equals(id).delete();
     }
     await db.gardens.delete(id);
@@ -524,13 +584,14 @@ export async function putBatches(rows: Batch[]): Promise<void> {
   await db.batches.bulkPut(rows);
 }
 
-/** 删除批次：级联删除轮次 / 杀青 / 焙火 / 审评 */
+/** 删除批次：级联删除轮次 / 杀青 / 焙火 / 审评 / 调度单 */
 export async function removeBatch(id: string): Promise<void> {
-  await db.transaction('rw', db.batches, db.turns, db.fixes, db.roasts, db.reviews, async () => {
+  await db.transaction('rw', [db.batches, db.turns, db.fixes, db.roasts, db.reviews, db.scheduleOrders], async () => {
     await db.turns.where('batchId').equals(id).delete();
     await db.fixes.where('batchId').equals(id).delete();
     await db.roasts.where('batchId').equals(id).delete();
     await db.reviews.where('batchId').equals(id).delete();
+    await db.scheduleOrders.where('batchId').equals(id).delete();
     await db.batches.delete(id);
   });
 }
@@ -622,6 +683,28 @@ export async function removeReview(id: string): Promise<void> {
   await db.reviews.delete(id);
 }
 
+/* ------------------------------ 工位调度单 ------------------------------ */
+
+export async function listScheduleOrders(): Promise<ScheduleOrder[]> {
+  return db.scheduleOrders.toArray();
+}
+
+export async function listScheduleOrdersByBatch(batchId: string): Promise<ScheduleOrder[]> {
+  return db.scheduleOrders.where('batchId').equals(batchId).toArray();
+}
+
+export async function putScheduleOrder(row: ScheduleOrder): Promise<void> {
+  await db.scheduleOrders.put(row);
+}
+
+export async function putScheduleOrders(rows: ScheduleOrder[]): Promise<void> {
+  await db.scheduleOrders.bulkPut(rows);
+}
+
+export async function removeScheduleOrder(id: string): Promise<void> {
+  await db.scheduleOrders.delete(id);
+}
+
 /* ---------------------------- 整库导入导出 ---------------------------- */
 
 /** 整库快照（导出 / 导入 JSON 的结构） */
@@ -635,24 +718,37 @@ export interface DatabaseSnapshot {
   fixes: Fix[];
   roasts: Roast[];
   reviews: Review[];
+  scheduleOrders: ScheduleOrder[];
 }
 
 /** 导出整库快照 */
 export async function exportSnapshot(): Promise<DatabaseSnapshot> {
-  const [gardens, batches, turns, fixes, roasts, reviews] = await Promise.all([
+  const [gardens, batches, turns, fixes, roasts, reviews, scheduleOrders] = await Promise.all([
     db.gardens.toArray(),
     db.batches.toArray(),
     db.turns.toArray(),
     db.fixes.toArray(),
     db.roasts.toArray(),
     db.reviews.toArray(),
+    db.scheduleOrders.toArray(),
   ]);
-  return { name: DB_NAME, schemaVersion: DB_VERSION, exportedAt: nowIso(), gardens, batches, turns, fixes, roasts, reviews };
+  return {
+    name: DB_NAME,
+    schemaVersion: DB_VERSION,
+    exportedAt: nowIso(),
+    gardens,
+    batches,
+    turns,
+    fixes,
+    roasts,
+    reviews,
+    scheduleOrders,
+  };
 }
 
 /** 用快照覆盖整库（导入存档） */
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
-  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews], async () => {
+  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews, db.scheduleOrders], async () => {
     await Promise.all([
       db.gardens.clear(),
       db.batches.clear(),
@@ -660,6 +756,7 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
       db.fixes.clear(),
       db.roasts.clear(),
       db.reviews.clear(),
+      db.scheduleOrders.clear(),
     ]);
     await db.gardens.bulkPut(snapshot.gardens);
     await db.batches.bulkPut(snapshot.batches);
@@ -667,12 +764,13 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     await db.fixes.bulkPut(snapshot.fixes);
     await db.roasts.bulkPut(snapshot.roasts);
     await db.reviews.bulkPut(snapshot.reviews);
+    await db.scheduleOrders.bulkPut(snapshot.scheduleOrders ?? []);
   });
 }
 
 /** 清空全部表（不重新播种） */
 export async function clearAllTables(): Promise<void> {
-  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews], async () => {
+  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews, db.scheduleOrders], async () => {
     await Promise.all([
       db.gardens.clear(),
       db.batches.clear(),
@@ -680,6 +778,7 @@ export async function clearAllTables(): Promise<void> {
       db.fixes.clear(),
       db.roasts.clear(),
       db.reviews.clear(),
+      db.scheduleOrders.clear(),
     ]);
   });
 }
@@ -692,13 +791,14 @@ export async function resetDatabase(): Promise<void> {
 
 /** 各表行数概览（页脚与统计徽标使用） */
 export async function countAll(): Promise<Record<string, number>> {
-  const [gardens, batches, turns, fixes, roasts, reviews] = await Promise.all([
+  const [gardens, batches, turns, fixes, roasts, reviews, scheduleOrders] = await Promise.all([
     db.gardens.count(),
     db.batches.count(),
     db.turns.count(),
     db.fixes.count(),
     db.roasts.count(),
     db.reviews.count(),
+    db.scheduleOrders.count(),
   ]);
-  return { gardens, batches, turns, fixes, roasts, reviews };
+  return { gardens, batches, turns, fixes, roasts, reviews, scheduleOrders };
 }

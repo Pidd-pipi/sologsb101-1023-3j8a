@@ -90,6 +90,14 @@ export const useRoastStore = create<RoastStoreState>((set, get) => ({
   },
 
   async createRoast(draft) {
+    // 占用未确认（排队中）时，焙火安排不能越过当前工序
+    const { useScheduleStore } = await import('./scheduleStore');
+    if (useScheduleStore.getState().batchUnconfirmed(draft.batchId)) {
+      const info = useScheduleStore.getState().infoForBatch(draft.batchId);
+      throw new Error(
+        `该批次的工位调度单仍在排队中（第 ${info.queueRank ?? '?'} 位），占用未确认前不能排焙火`,
+      );
+    }
     const branch = get().roasts.filter((roast) => roast.batchId === draft.batchId);
     const stamp = nowIso();
     const row: Roast = {
@@ -139,6 +147,14 @@ export const useRoastStore = create<RoastStoreState>((set, get) => ({
   async advanceRoastState(roastId) {
     const existing = get().roasts.find((roast) => roast.id === roastId);
     if (!existing) return null;
+    // 占用未确认（排队中）时，焙火安排不能越过当前工序
+    const { useScheduleStore } = await import('./scheduleStore');
+    if (useScheduleStore.getState().batchUnconfirmed(existing.batchId)) {
+      const info = useScheduleStore.getState().infoForBatch(existing.batchId);
+      throw new Error(
+        `该批次的工位调度单仍在排队中（第 ${info.queueRank ?? '?'} 位），占用未确认前不能推进焙火状态`,
+      );
+    }
     const next = nextRoastState(existing.state);
     if (!next) return null;
     await putRoast({ ...existing, state: next, updatedAt: nowIso() });

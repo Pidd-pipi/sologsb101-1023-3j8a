@@ -290,6 +290,14 @@ export const useBatchStore = create<BatchStoreState>((set, get) => ({
     const batch = get().batches.find((item) => item.id === batchId);
     if (!batch) return null;
     if (batchStateOrder(target) <= batchStateOrder(batch.state)) return batch.state;
+    // 占用未确认（排队中）时，批次状态不能越过当前工序
+    const { useScheduleStore } = await import('./scheduleStore');
+    if (useScheduleStore.getState().batchUnconfirmed(batchId)) {
+      const info = useScheduleStore.getState().infoForBatch(batchId);
+      throw new Error(
+        `批次「${batchLabel(batch, '')}」的工位调度单仍在排队中（第 ${info.queueRank ?? '?'} 位），占用未确认前不能推进工序`,
+      );
+    }
     const next: Batch = { ...batch, state: target, updatedAt: nowIso() };
     await putBatch(next);
     await get().loadBatches();
