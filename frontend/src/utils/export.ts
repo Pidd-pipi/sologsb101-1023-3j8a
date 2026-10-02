@@ -155,6 +155,9 @@ export function parseSnapshotJson(text: string): DatabaseSnapshot {
   assertRows(raw.fixes, 'fixes');
   assertRows(raw.roasts, 'roasts');
   assertRows(raw.reviews, 'reviews');
+  // v3 新增：旧版本存档没有这两张表，缺省按空表处理（导入时补建默认工位）
+  if (raw.workstations !== undefined) assertRows(raw.workstations, 'workstations');
+  if (raw.dispatchOrders !== undefined) assertRows(raw.dispatchOrders, 'dispatchOrders');
   return {
     name: DB_NAME,
     schemaVersion: typeof raw.schemaVersion === 'number' ? raw.schemaVersion : DB_VERSION,
@@ -165,6 +168,8 @@ export function parseSnapshotJson(text: string): DatabaseSnapshot {
     fixes: raw.fixes as DatabaseSnapshot['fixes'],
     roasts: raw.roasts as DatabaseSnapshot['roasts'],
     reviews: raw.reviews as DatabaseSnapshot['reviews'],
+    workstations: (raw.workstations ?? []) as DatabaseSnapshot['workstations'],
+    dispatchOrders: (raw.dispatchOrders ?? []) as DatabaseSnapshot['dispatchOrders'],
   };
 }
 

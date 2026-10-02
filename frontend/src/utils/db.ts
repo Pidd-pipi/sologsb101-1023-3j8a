@@ -12,13 +12,14 @@ import { TURN_LIMITS, type Turn } from '../types/turn';
 import type { Fix } from '../types/fix';
 import { ROAST_STATES, type Roast } from '../types/roast';
 import type { Review } from '../types/review';
+import type { DispatchOrder, Workstation } from '../types/dispatch';
 import { clampScore, weightedTotalScore } from './tea';
 
 /** 数据库名 = 英文短名 */
 export const DB_NAME = 'gbtearock';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 /** 主键前缀，便于在导出 JSON 里肉眼区分实体 */
 export const ID_PREFIX = {
@@ -28,6 +29,8 @@ export const ID_PREFIX = {
   fix: 'fix',
   roast: 'roast',
   review: 'review',
+  workstation: 'ws',
+  dispatchOrder: 'dsp',
 } as const;
 
 class TeaRockDatabase extends Dexie {
@@ -37,6 +40,8 @@ class TeaRockDatabase extends Dexie {
   fixes!: Table<Fix, string>;
   roasts!: Table<Roast, string>;
   reviews!: Table<Review, string>;
+  workstations!: Table<Workstation, string>;
+  dispatchOrders!: Table<DispatchOrder, string>;
 
   constructor() {
     super(DB_NAME);
@@ -154,6 +159,14 @@ class TeaRockDatabase extends Dexie {
             });
           });
       });
+
+    // v3：工位调度台 —— workstations（揉捻机 / 焙火炉）+ dispatchOrders（调度单）。
+    //     纯新增表：既有六张表无需迁移数据，旧批次没有调度单时各处统一按「未排队」显示。
+    this.version(DB_VERSION).stores({
+      workstations: 'id, kind, name, enabled, createdAt, updatedAt',
+      dispatchOrders:
+        'id, seq, batchId, task, state, ownerSessionId, leaseExpiresAt, submittedAt, [task+state], [batchId+state], createdAt, updatedAt',
+    });
   }
 }
 
@@ -433,14 +446,29 @@ export async function seedDatabase(): Promise<void> {
     }),
   }));
 
-  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews], async () => {
-    if ((await db.gardens.count()) === 0) await db.gardens.bulkPut(gardens);
-    if ((await db.batches.count()) === 0) await db.batches.bulkPut(batches);
-    if ((await db.turns.count()) === 0) await db.turns.bulkPut(turns);
-    if ((await db.fixes.count()) === 0) await db.fixes.bulkPut(fixes);
-    if ((await db.roasts.count()) === 0) await db.roasts.bulkPut(roasts);
-    if ((await db.reviews.count()) === 0) await db.reviews.bulkPut(reviews);
-  });
+  // 工位固定 2 揉捻机 + 2 焙火炉：同一时刻最多放行 2 个任务，
+  // 茶季高峰第 3 个提交即按提交先后排队（FIFO、队头阻塞）。
+  const workstations: Workstation[] = [
+    { id: 'ws-roller-1', kind: 'roller', name: '揉捻机 R1', note: '主力机 · 可调轻重压', enabled: true, createdAt: stamp, updatedAt: stamp },
+    { id: 'ws-roller-2', kind: 'roller', name: '揉捻机 R2', note: '备用机 · 中轻压', enabled: true, createdAt: stamp, updatedAt: stamp },
+    { id: 'ws-oven-1', kind: 'oven', name: '焙火炉 O1', note: '荔枝炭 / 龙眼炭', enabled: true, createdAt: stamp, updatedAt: stamp },
+    { id: 'ws-oven-2', kind: 'oven', name: '焙火炉 O2', note: '机制炭 · 恒温风道', enabled: true, createdAt: stamp, updatedAt: stamp },
+  ];
+
+  await db.transaction(
+    'rw',
+    [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews, db.workstations, db.dispatchOrders],
+    async () => {
+      if ((await db.gardens.count()) === 0) await db.gardens.bulkPut(gardens);
+      if ((await db.batches.count()) === 0) await db.batches.bulkPut(batches);
+      if ((await db.turns.count()) === 0) await db.turns.bulkPut(turns);
+      if ((await db.fixes.count()) === 0) await db.fixes.bulkPut(fixes);
+      if ((await db.roasts.count()) === 0) await db.roasts.bulkPut(roasts);
+      if ((await db.reviews.count()) === 0) await db.reviews.bulkPut(reviews);
+      // 工位为固定设备：空表才灌入，保证幂等且不覆盖车间在调度台里做的停用调整
+      if ((await db.workstations.count()) === 0) await db.workstations.bulkPut(workstations);
+    },
+  );
 }
 
 /** 播种用的轮次构造器，避免重复字段声明 */
@@ -484,20 +512,25 @@ export async function putGarden(row: Garden): Promise<void> {
   await db.gardens.put(row);
 }
 
-/** 删除山场：级联删除其批次及批次下的轮次 / 杀青 / 焙火 / 审评 */
+/** 删除山场：级联删除其批次及批次下的轮次 / 杀青 / 焙火 / 审评 / 调度单 */
 export async function removeGarden(id: string): Promise<void> {
-  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews], async () => {
-    const batches = await db.batches.where('gardenId').equals(id).toArray();
-    const batchIds = batches.map((batch) => batch.id);
-    if (batchIds.length > 0) {
-      await db.turns.where('batchId').anyOf(batchIds).delete();
-      await db.fixes.where('batchId').anyOf(batchIds).delete();
-      await db.roasts.where('batchId').anyOf(batchIds).delete();
-      await db.reviews.where('batchId').anyOf(batchIds).delete();
-      await db.batches.where('gardenId').equals(id).delete();
-    }
-    await db.gardens.delete(id);
-  });
+  await db.transaction(
+    'rw',
+    [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews, db.dispatchOrders],
+    async () => {
+      const batches = await db.batches.where('gardenId').equals(id).toArray();
+      const batchIds = batches.map((batch) => batch.id);
+      if (batchIds.length > 0) {
+        await db.turns.where('batchId').anyOf(batchIds).delete();
+        await db.fixes.where('batchId').anyOf(batchIds).delete();
+        await db.roasts.where('batchId').anyOf(batchIds).delete();
+        await db.reviews.where('batchId').anyOf(batchIds).delete();
+        await db.dispatchOrders.where('batchId').anyOf(batchIds).delete();
+        await db.batches.where('gardenId').equals(id).delete();
+      }
+      await db.gardens.delete(id);
+    },
+  );
 }
 
 /* ------------------------------ 茶青批次 ------------------------------ */
@@ -524,15 +557,21 @@ export async function putBatches(rows: Batch[]): Promise<void> {
   await db.batches.bulkPut(rows);
 }
 
-/** 删除批次：级联删除轮次 / 杀青 / 焙火 / 审评 */
+/** 删除批次：级联删除轮次 / 杀青 / 焙火 / 审评 / 调度单 */
 export async function removeBatch(id: string): Promise<void> {
-  await db.transaction('rw', db.batches, db.turns, db.fixes, db.roasts, db.reviews, async () => {
-    await db.turns.where('batchId').equals(id).delete();
-    await db.fixes.where('batchId').equals(id).delete();
-    await db.roasts.where('batchId').equals(id).delete();
-    await db.reviews.where('batchId').equals(id).delete();
-    await db.batches.delete(id);
-  });
+  await db.transaction(
+    'rw',
+    [db.batches, db.turns, db.fixes, db.roasts, db.reviews, db.dispatchOrders],
+    async () => {
+      await db.turns.where('batchId').equals(id).delete();
+      await db.fixes.where('batchId').equals(id).delete();
+      await db.roasts.where('batchId').equals(id).delete();
+      await db.reviews.where('batchId').equals(id).delete();
+      // 调度单全部删除：HELD 单本身就是占用记录，随级联事务一起清除，不留悬空位
+      await db.dispatchOrders.where('batchId').equals(id).delete();
+      await db.batches.delete(id);
+    },
+  );
 }
 
 /* ------------------------------ 做青轮次 ------------------------------ */
@@ -622,6 +661,36 @@ export async function removeReview(id: string): Promise<void> {
   await db.reviews.delete(id);
 }
 
+/* ------------------------------ 工位 / 调度 ------------------------------ */
+
+export async function listWorkstations(): Promise<Workstation[]> {
+  const rows = await db.workstations.toArray();
+  const rank = { roller: 0, oven: 1 } as const;
+  return rows.sort((a, b) => rank[a.kind] - rank[b.kind] || a.name.localeCompare(b.name, 'zh-Hans-CN'));
+}
+
+export async function putWorkstation(row: Workstation): Promise<void> {
+  await db.workstations.put(row);
+}
+
+export async function listDispatchOrders(): Promise<DispatchOrder[]> {
+  const rows = await db.dispatchOrders.toArray();
+  return rows.sort((a, b) => a.seq - b.seq || a.submittedAt.localeCompare(b.submittedAt));
+}
+
+export async function listDispatchOrdersByBatch(batchId: string): Promise<DispatchOrder[]> {
+  const rows = await db.dispatchOrders.where('batchId').equals(batchId).toArray();
+  return rows.sort((a, b) => a.seq - b.seq);
+}
+
+export async function putDispatchOrder(row: DispatchOrder): Promise<void> {
+  await db.dispatchOrders.put(row);
+}
+
+export async function removeDispatchOrder(id: string): Promise<void> {
+  await db.dispatchOrders.delete(id);
+}
+
 /* ---------------------------- 整库导入导出 ---------------------------- */
 
 /** 整库快照（导出 / 导入 JSON 的结构） */
@@ -635,53 +704,93 @@ export interface DatabaseSnapshot {
   fixes: Fix[];
   roasts: Roast[];
   reviews: Review[];
+  workstations: Workstation[];
+  dispatchOrders: DispatchOrder[];
 }
 
 /** 导出整库快照 */
 export async function exportSnapshot(): Promise<DatabaseSnapshot> {
-  const [gardens, batches, turns, fixes, roasts, reviews] = await Promise.all([
+  const [gardens, batches, turns, fixes, roasts, reviews, workstations, dispatchOrders] = await Promise.all([
     db.gardens.toArray(),
     db.batches.toArray(),
     db.turns.toArray(),
     db.fixes.toArray(),
     db.roasts.toArray(),
     db.reviews.toArray(),
+    db.workstations.toArray(),
+    db.dispatchOrders.toArray(),
   ]);
-  return { name: DB_NAME, schemaVersion: DB_VERSION, exportedAt: nowIso(), gardens, batches, turns, fixes, roasts, reviews };
+  return {
+    name: DB_NAME,
+    schemaVersion: DB_VERSION,
+    exportedAt: nowIso(),
+    gardens,
+    batches,
+    turns,
+    fixes,
+    roasts,
+    reviews,
+    workstations,
+    dispatchOrders,
+  };
 }
 
-/** 用快照覆盖整库（导入存档） */
+/** 用快照覆盖整库（导入存档）；v3 之前的旧存档没有工位 / 调度单，按空表处理后补建默认工位 */
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
-  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews], async () => {
-    await Promise.all([
-      db.gardens.clear(),
-      db.batches.clear(),
-      db.turns.clear(),
-      db.fixes.clear(),
-      db.roasts.clear(),
-      db.reviews.clear(),
-    ]);
-    await db.gardens.bulkPut(snapshot.gardens);
-    await db.batches.bulkPut(snapshot.batches);
-    await db.turns.bulkPut(snapshot.turns);
-    await db.fixes.bulkPut(snapshot.fixes);
-    await db.roasts.bulkPut(snapshot.roasts);
-    await db.reviews.bulkPut(snapshot.reviews);
-  });
+  await db.transaction(
+    'rw',
+    [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews, db.workstations, db.dispatchOrders],
+    async () => {
+      await Promise.all([
+        db.gardens.clear(),
+        db.batches.clear(),
+        db.turns.clear(),
+        db.fixes.clear(),
+        db.roasts.clear(),
+        db.reviews.clear(),
+        db.workstations.clear(),
+        db.dispatchOrders.clear(),
+      ]);
+      await db.gardens.bulkPut(snapshot.gardens);
+      await db.batches.bulkPut(snapshot.batches);
+      await db.turns.bulkPut(snapshot.turns);
+      await db.fixes.bulkPut(snapshot.fixes);
+      await db.roasts.bulkPut(snapshot.roasts);
+      await db.reviews.bulkPut(snapshot.reviews);
+      await db.workstations.bulkPut(snapshot.workstations);
+      await db.dispatchOrders.bulkPut(snapshot.dispatchOrders);
+      // 旧存档兼容：没有工位数据时补建默认 2 + 2，保证调度台可用
+      if (snapshot.workstations.length === 0) {
+        const stamp = nowIso();
+        await db.workstations.bulkPut([
+          { id: 'ws-roller-1', kind: 'roller', name: '揉捻机 R1', note: '主力机 · 可调轻重压', enabled: true, createdAt: stamp, updatedAt: stamp },
+          { id: 'ws-roller-2', kind: 'roller', name: '揉捻机 R2', note: '备用机 · 中轻压', enabled: true, createdAt: stamp, updatedAt: stamp },
+          { id: 'ws-oven-1', kind: 'oven', name: '焙火炉 O1', note: '荔枝炭 / 龙眼炭', enabled: true, createdAt: stamp, updatedAt: stamp },
+          { id: 'ws-oven-2', kind: 'oven', name: '焙火炉 O2', note: '机制炭 · 恒温风道', enabled: true, createdAt: stamp, updatedAt: stamp },
+        ]);
+      }
+    },
+  );
 }
 
 /** 清空全部表（不重新播种） */
 export async function clearAllTables(): Promise<void> {
-  await db.transaction('rw', [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews], async () => {
-    await Promise.all([
-      db.gardens.clear(),
-      db.batches.clear(),
-      db.turns.clear(),
-      db.fixes.clear(),
-      db.roasts.clear(),
-      db.reviews.clear(),
-    ]);
-  });
+  await db.transaction(
+    'rw',
+    [db.gardens, db.batches, db.turns, db.fixes, db.roasts, db.reviews, db.workstations, db.dispatchOrders],
+    async () => {
+      await Promise.all([
+        db.gardens.clear(),
+        db.batches.clear(),
+        db.turns.clear(),
+        db.fixes.clear(),
+        db.roasts.clear(),
+        db.reviews.clear(),
+        // 工位是车间固定设备：清空业务数据时保留工位，只清空调度单
+        db.dispatchOrders.clear(),
+      ]);
+    },
+  );
 }
 
 /** 清空全部数据并重新灌入演示数据 */
@@ -692,13 +801,15 @@ export async function resetDatabase(): Promise<void> {
 
 /** 各表行数概览（页脚与统计徽标使用） */
 export async function countAll(): Promise<Record<string, number>> {
-  const [gardens, batches, turns, fixes, roasts, reviews] = await Promise.all([
+  const [gardens, batches, turns, fixes, roasts, reviews, workstations, dispatchOrders] = await Promise.all([
     db.gardens.count(),
     db.batches.count(),
     db.turns.count(),
     db.fixes.count(),
     db.roasts.count(),
     db.reviews.count(),
+    db.workstations.count(),
+    db.dispatchOrders.count(),
   ]);
-  return { gardens, batches, turns, fixes, roasts, reviews };
+  return { gardens, batches, turns, fixes, roasts, reviews, workstations, dispatchOrders };
 }

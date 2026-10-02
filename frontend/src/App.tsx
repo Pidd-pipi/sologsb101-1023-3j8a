@@ -12,11 +12,14 @@ import {
   GoldOutlined,
   ProfileOutlined,
   StarOutlined,
+  UnorderedListOutlined,
 } from '@ant-design/icons';
 import { NAV_ORDER, ROUTES, ROUTE_META } from './router';
 import { useGardenStore } from './stores/gardenStore';
 import { useBatchStore } from './stores/batchStore';
 import { useRoastStore } from './stores/roastStore';
+import { useDispatchStore } from './stores/dispatchStore';
+import RunDispatchDialog from './components/common/RunDispatchDialog';
 import { initDatabase } from './utils/db';
 import { batchLabel } from './utils/tea';
 
@@ -28,6 +31,7 @@ const NAV_ICON: Record<string, ReactNode> = {
   '/turns': <ExperimentOutlined />,
   '/fixing': <GoldOutlined />,
   '/roasting': <FireOutlined />,
+  '/dispatch': <UnorderedListOutlined />,
   '/reviews': <StarOutlined />,
   '/blending': <ProfileOutlined />,
 };
@@ -49,6 +53,13 @@ export default function App() {
   const loadReviews = useBatchStore((state) => state.loadReviews);
 
   const loadRoasts = useRoastStore((state) => state.loadRoasts);
+
+  const initDispatchRuntime = useDispatchStore((state) => state.initRuntime);
+
+  // 工位调度运行时：liveQuery 订阅 + 租约心跳 / 超时清扫 / pagehide 释放（整个应用一份）
+  useEffect(() => {
+    initDispatchRuntime();
+  }, [initDispatchRuntime]);
 
   // 首次进入：打开数据库（必要时播种）→ 加载各 store 的跨页数据
   useEffect(() => {
@@ -114,6 +125,7 @@ export default function App() {
             <div>山场 {counts.gardens ?? 0} · 批次 {counts.batches ?? 0}</div>
             <div>轮次 {counts.turns ?? 0} · 杀青 {counts.fixes ?? 0}</div>
             <div>焙火 {counts.roasts ?? 0} · 审评 {counts.reviews ?? 0}</div>
+            <div>工位 {counts.workstations ?? 0} · 调度 {counts.dispatchOrders ?? 0}</div>
           </div>
         </Sider>
 
@@ -161,6 +173,9 @@ export default function App() {
           </Footer>
         </Layout>
       </Layout>
+
+      {/* 工位占用 → 确认的全局弹窗：杀青页 / 焙火页 / 调度台共用，保证队列与租约只有一份 */}
+      <RunDispatchDialog />
     </>
   );
 }

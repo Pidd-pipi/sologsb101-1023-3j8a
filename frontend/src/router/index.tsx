@@ -1,5 +1,5 @@
 /**
- * 路由表：/gardens、/turns、/fixing、/roasting、/reviews、/blending
+ * 路由表：/gardens、/turns、/fixing、/roasting、/dispatch、/reviews、/blending
  * 页面按路由懒加载（构建时自动分包）；`/` 与未知路径统一重定向到第一个模块路径 /gardens。
  */
 import { Suspense, lazy, type ReactNode } from 'react';
@@ -11,6 +11,7 @@ const GardenList = lazy(() => import('../pages/GardenList'));
 const TurnBoard = lazy(() => import('../pages/TurnBoard'));
 const FixRecord = lazy(() => import('../pages/FixRecord'));
 const RoastPlan = lazy(() => import('../pages/RoastPlan'));
+const DispatchBoard = lazy(() => import('../pages/DispatchBoard'));
 const ReviewBoard = lazy(() => import('../pages/ReviewBoard'));
 const BlendPlan = lazy(() => import('../pages/BlendPlan'));
 
@@ -20,6 +21,7 @@ export const ROUTES = {
   turns: '/turns',
   fixing: '/fixing',
   roasting: '/roasting',
+  dispatch: '/dispatch',
   reviews: '/reviews',
   blending: '/blending',
 } as const;
@@ -30,6 +32,7 @@ export const ROUTE_META: Record<string, string> = {
   [ROUTES.turns]: '做青轮次编排',
   [ROUTES.fixing]: '杀青揉捻记录',
   [ROUTES.roasting]: '焙火曲线与复焙安排',
+  [ROUTES.dispatch]: '工位调度台',
   [ROUTES.reviews]: '毛茶审评',
   [ROUTES.blending]: '拼配方案登记',
 };
@@ -40,6 +43,7 @@ export const NAV_ORDER: string[] = [
   ROUTES.turns,
   ROUTES.fixing,
   ROUTES.roasting,
+  ROUTES.dispatch,
   ROUTES.reviews,
   ROUTES.blending,
 ];
@@ -64,6 +68,7 @@ export const appRoutes: RouteObject[] = [
       { path: 'turns', element: withSuspense(<TurnBoard />) },
       { path: 'fixing', element: withSuspense(<FixRecord />) },
       { path: 'roasting', element: withSuspense(<RoastPlan />) },
+      { path: 'dispatch', element: withSuspense(<DispatchBoard />) },
       { path: 'reviews', element: withSuspense(<ReviewBoard />) },
       { path: 'blending', element: withSuspense(<BlendPlan />) },
       { path: '*', element: <Navigate to={ROUTES.gardens} replace /> },

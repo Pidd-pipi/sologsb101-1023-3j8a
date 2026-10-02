@@ -6,6 +6,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   App,
   Button,
   Card,
@@ -35,8 +36,11 @@ import FilterBar, { type FilterSelectConfig } from '../components/common/FilterB
 import GradeTag from '../components/common/GradeTag';
 import StatBadge from '../components/common/StatBadge';
 import EmptyPanel from '../components/common/EmptyPanel';
+import DispatchBadge from '../components/common/DispatchBadge';
 import { useGardenStore } from '../stores/gardenStore';
 import { useBatchStore } from '../stores/batchStore';
+import { useDispatchStore } from '../stores/dispatchStore';
+import { batchDispatchSummary, heldOrders } from '../utils/dispatchViews';
 import {
   buildReminders,
   filterRoasts,
@@ -70,11 +74,15 @@ export default function RoastPlan() {
   const setFilters = useRoastStore((state) => state.setFilters);
   const resetFilters = useRoastStore((state) => state.resetFilters);
   const loadRoasts = useRoastStore((state) => state.loadRoasts);
-  const createRoast = useRoastStore((state) => state.createRoast);
   const updateRoast = useRoastStore((state) => state.updateRoast);
   const deleteRoast = useRoastStore((state) => state.deleteRoast);
   const advanceRoastState = useRoastStore((state) => state.advanceRoastState);
   const movePass = useRoastStore((state) => state.movePass);
+
+  const dispatchOrders = useDispatchStore((state) => state.orders);
+  const dispatchWorkstations = useDispatchStore((state) => state.workstations);
+  const openRun = useDispatchStore((state) => state.openRun);
+  const globalHeld = useMemo(() => heldOrders(dispatchOrders), [dispatchOrders]);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRoast, setEditingRoast] = useState<Roast | null>(null);
@@ -93,6 +101,11 @@ export default function RoastPlan() {
 
   const rows = useMemo(() => filterRoasts(roasts, batches, gardens, roastFilters), [batches, gardens, roastFilters, roasts]);
   const reminders = useMemo(() => buildReminders(roasts), [roasts]);
+  const dispatchSummaryMap = useMemo(() => {
+    return new Map(
+      batches.map((batch) => [batch.id, batchDispatchSummary(batch.id, dispatchOrders, dispatchWorkstations)]),
+    );
+  }, [batches, dispatchOrders, dispatchWorkstations]);
 
   /** 过滤结果按批次分组 */
   const grouped = useMemo(() => {
@@ -175,12 +188,29 @@ export default function RoastPlan() {
       if (editingRoast) {
         await updateRoast(editingRoast.id, values);
         message.success(`第 ${editingRoast.passNo} 道焙火已更新`);
-      } else {
-        const created = await createRoast(values);
-        message.success(`已新增第 ${created.passNo} 道焙火`);
+        setModalOpen(false);
+        setEditingRoast(null);
+        return;
       }
-      setModalOpen(false);
-      setEditingRoast(null);
+      // 工序闸门：焙火安排必须在「已杀青」之后；未到工序不得通过占工位越级排焙
+      const targetBatch = batches.find((batch) => batch.id === values.batchId);
+      if (targetBatch && targetBatch.state === '做青中') {
+        message.error('该批次尚未杀青：占用未确认前焙火安排不能越过当前工序，请先完成杀青揉捻');
+        return;
+      }
+      // 新建道次走调度台：同时拿到揉捻机 + 焙火炉并确认后，焙火道次才落库
+      openRun({
+        batchId: values.batchId,
+        task: 'ROAST',
+        note: `焙火安排 · 第 ${roastsOfBatch(roasts, values.batchId).length + 1} 道`,
+        payload: { kind: 'ROAST', draft: values },
+        onComplete: async () => {
+          setModalOpen(false);
+          setEditingRoast(null);
+          await loadRoasts();
+          message.success('焙火道次已随工位确认登记');
+        },
+      });
     } catch (error) {
       message.error(error instanceof Error ? error.message : '焙火记录保存失败');
     }
@@ -205,11 +235,15 @@ export default function RoastPlan() {
   };
 
   const handleAdvance = async (roast: Roast): Promise<void> => {
-    const next = await advanceRoastState(roast.id);
-    if (next) {
-      message.success(`第 ${roast.passNo} 道状态已推进到「${next}」${next === '已足火' ? '，批次已回写为「已焙火」' : ''}`);
-    } else {
-      message.info('该道次已是「已足火」');
+    try {
+      const next = await advanceRoastState(roast.id);
+      if (next) {
+        message.success(`第 ${roast.passNo} 道状态已推进到「${next}」${next === '已足火' ? '，批次已回写为「已焙火」' : ''}`);
+      } else {
+        message.info('该道次已是「已足火」');
+      }
+    } catch (error) {
+      message.warning(error instanceof Error ? error.message : '道次状态暂不能推进');
     }
   };
 
@@ -249,6 +283,15 @@ export default function RoastPlan() {
           hint="7 日内到期或已逾期的复焙提醒"
         />
       </div>
+
+      {globalHeld.length > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`有 ${globalHeld.length} 个工位占用尚未确认（#${globalHeld[0].seq} 起）：确认前排焙火与批次状态不能越过当前工序`}
+        />
+      ) : null}
 
       <Card
         className="panel-card"
@@ -323,6 +366,7 @@ export default function RoastPlan() {
                       <span>{labelOfBatch(group.batchId)}</span>
                       <GradeTag kind="fire" value={fireLevel} />
                       {fullFire ? <Tag color="volcano">足火判定通过</Tag> : null}
+                      <DispatchBadge summary={dispatchSummaryMap.get(group.batchId)!} />
                     </Space>
                   }
                   extra={
@@ -411,7 +455,7 @@ export default function RoastPlan() {
       <Modal
         open={modalOpen}
         title={editingRoast ? `编辑第 ${editingRoast.passNo} 道焙火` : '新建焙火道次'}
-        okText={editingRoast ? '保存' : '新增道次'}
+        okText={editingRoast ? '保存' : '提交并占工位'}
         cancelText="取消"
         onCancel={() => {
           setModalOpen(false);

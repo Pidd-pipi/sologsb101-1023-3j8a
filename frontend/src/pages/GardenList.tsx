@@ -7,6 +7,7 @@
  */
 import { useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   App,
   Button,
   Card,
@@ -38,9 +39,12 @@ import FilterBar, { type FilterSelectConfig } from '../components/common/FilterB
 import GradeTag from '../components/common/GradeTag';
 import StatBadge from '../components/common/StatBadge';
 import EmptyPanel from '../components/common/EmptyPanel';
+import DispatchBadge from '../components/common/DispatchBadge';
 import { useTurnTimeline } from '../hooks/useTurnTimeline';
 import { filterGardens, useGardenStore } from '../stores/gardenStore';
 import { useBatchStore } from '../stores/batchStore';
+import { useDispatchStore } from '../stores/dispatchStore';
+import { batchDispatchSummary, heldOrders } from '../utils/dispatchViews';
 import { ALTITUDE_BANDS, CULTIVAR_OPTIONS, SOIL_OPTIONS, type Garden, type GardenDraft } from '../types/garden';
 import { BATCH_STATES, TENDERNESS_OPTIONS, type Batch, type BatchDraft } from '../types/batch';
 import {
@@ -83,6 +87,9 @@ export default function GardenList() {
   const loadBatches = useBatchStore((state) => state.loadBatches);
   const loadReviews = useBatchStore((state) => state.loadReviews);
 
+  const dispatchOrders = useDispatchStore((state) => state.orders);
+  const dispatchWorkstations = useDispatchStore((state) => state.workstations);
+
   const [gardenModalOpen, setGardenModalOpen] = useState(false);
   const [editingGarden, setEditingGarden] = useState<Garden | null>(null);
   const [batchModalOpen, setBatchModalOpen] = useState(false);
@@ -90,6 +97,15 @@ export default function GardenList() {
   const [drawerGardenId, setDrawerGardenId] = useState<string | null>(null);
 
   const rows = useMemo(() => filterGardens(gardens, filters), [gardens, filters]);
+
+  const dispatchSummaryMap = useMemo(
+    () =>
+      new Map(
+        batches.map((batch) => [batch.id, batchDispatchSummary(batch.id, dispatchOrders, dispatchWorkstations)]),
+      ),
+    [batches, dispatchOrders, dispatchWorkstations],
+  );
+  const globalHeld = useMemo(() => heldOrders(dispatchOrders), [dispatchOrders]);
 
   const totals = useMemo(() => {
     const list = Object.values(metrics);
@@ -244,12 +260,16 @@ export default function GardenList() {
   };
 
   const handleAdvance = async (batch: Batch): Promise<void> => {
-    const next = await advanceBatchState(batch.id);
-    if (next) {
-      await loadGardens();
-      message.success(`批次状态已推进到「${next}」`);
-    } else {
-      message.info('该批次已完成全部工序（已审评）');
+    try {
+      const next = await advanceBatchState(batch.id);
+      if (next) {
+        await loadGardens();
+        message.success(`批次状态已推进到「${next}」`);
+      } else {
+        message.info('该批次已完成全部工序（已审评）');
+      }
+    } catch (error) {
+      message.warning(error instanceof Error ? error.message : '工序状态暂不能推进');
     }
   };
 
@@ -292,6 +312,15 @@ export default function GardenList() {
       dataIndex: 'state',
       width: 120,
       render: (value: Batch['state']) => <GradeTag kind="state" value={value} />,
+    },
+    {
+      title: '调度名次 / 占用',
+      key: 'dispatch',
+      width: 210,
+      render: (_: unknown, batch: Batch) => {
+        const summary = dispatchSummaryMap.get(batch.id);
+        return summary ? <DispatchBadge summary={summary} /> : <Tag>未排队</Tag>;
+      },
     },
     {
       title: '操作',
@@ -363,6 +392,15 @@ export default function GardenList() {
           hint="按山场下已有审评记录加权总分求平均"
         />
       </div>
+
+      {globalHeld.length > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`有 ${globalHeld.length} 个工位占用尚未确认（#${globalHeld[0].seq} 起）：揉捻机 / 焙火炉占用未确认时，批次状态与焙火安排不能越过当前工序`}
+        />
+      ) : null}
 
       <FilterBar
         value={filters}
@@ -492,7 +530,7 @@ export default function GardenList() {
               dataSource={detailBatches}
               columns={batchColumns}
               pagination={false}
-              scroll={{ x: 720 }}
+              scroll={{ x: 940 }}
             />
             <div className="panel-card" style={{ marginTop: 16 }}>
               <Typography.Title level={5} style={{ marginTop: 0 }}>

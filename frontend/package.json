@@ -8,7 +8,10 @@
     "dev": "vite --host --port 22823",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host --port 22823",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:dispatch": "esbuild scheduler-test.mts --bundle --platform=node --format=esm --outfile=node_modules/.cache/dispatch-test.mjs --log-level=warning && node node_modules/.cache/dispatch-test.mjs",
+    "test:smoke": "esbuild component-smoke.mts --bundle --platform=node --format=esm --outfile=node_modules/.cache/component-smoke.mjs --log-level=warning --resolve-extensions=.tsx,.ts,.jsx,.js --external:jsdom --external:fake-indexeddb && node node_modules/.cache/component-smoke.mjs",
+    "test": "npm run test:dispatch && npm run test:smoke"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.1",
@@ -25,6 +28,9 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "esbuild": "^0.21.5",
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^25.0.1",
     "typescript": "~5.6.3",
     "vite": "^5.4.11"
   }

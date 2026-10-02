@@ -6,6 +6,7 @@
  */
 import { useMemo, useState } from 'react';
 import {
+  Alert,
   App,
   Button,
   Card,
@@ -27,9 +28,12 @@ import FilterBar, { type FilterSelectConfig } from '../components/common/FilterB
 import GradeTag from '../components/common/GradeTag';
 import StatBadge from '../components/common/StatBadge';
 import EmptyPanel from '../components/common/EmptyPanel';
+import DispatchBadge from '../components/common/DispatchBadge';
 import { useIdbTable } from '../hooks/useIdbTable';
 import { useGardenStore } from '../stores/gardenStore';
 import { filterFixes, useBatchStore } from '../stores/batchStore';
+import { useDispatchStore } from '../stores/dispatchStore';
+import { batchDispatchSummary, heldOrders } from '../utils/dispatchViews';
 import { db } from '../utils/db';
 import { FIX_LIMITS, ROLL_PRESSURE_OPTIONS, type Fix, type FixDraft } from '../types/fix';
 import { batchLabel, judgeFixLevel, roundTo } from '../utils/tea';
@@ -46,6 +50,10 @@ export default function FixRecord() {
   const markBatchState = useBatchStore((state) => state.markBatchState);
   const loadBatches = useBatchStore((state) => state.loadBatches);
 
+  const dispatchOrders = useDispatchStore((state) => state.orders);
+  const workstations = useDispatchStore((state) => state.workstations);
+  const openRun = useDispatchStore((state) => state.openRun);
+
   const fixesTable = useIdbTable<Fix>(db.fixes, { prefix: 'fix', sort: (a, b) => b.createdAt.localeCompare(a.createdAt) });
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -53,6 +61,11 @@ export default function FixRecord() {
 
   const gardenMap = useMemo(() => new Map(gardens.map((garden) => [garden.id, garden])), [gardens]);
   const batchMap = useMemo(() => new Map(batches.map((batch) => [batch.id, batch])), [batches]);
+  const dispatchSummaryMap = useMemo(() => {
+    const map = new Map(batches.map((batch) => [batch.id, batchDispatchSummary(batch.id, dispatchOrders, workstations)]));
+    return map;
+  }, [batches, dispatchOrders, workstations]);
+  const globalHeld = useMemo(() => heldOrders(dispatchOrders), [dispatchOrders]);
 
   const rows = useMemo(
     () => filterFixes(fixesTable.rows, batches, gardens, fixFilters),
@@ -120,17 +133,23 @@ export default function FixRecord() {
       if (editingFix) {
         await fixesTable.update(editingFix.id, values);
         message.success('杀青揉捻记录已更新');
-      } else {
-        await fixesTable.create(values);
-        message.success('杀青揉捻记录已登记');
+        setModalOpen(false);
+        setEditingFix(null);
+        return;
       }
-      const nextState = await markBatchState(values.batchId, '已杀青');
-      if (nextState) {
-        message.success(`批次工序状态已回写为「${nextState}」`);
-      }
-      setModalOpen(false);
-      setEditingFix(null);
-      await loadBatches();
+      // 新登记走调度台：同时拿到揉捻机 + 焙火炉并确认后，记录与「已杀青」状态才落库
+      openRun({
+        batchId: values.batchId,
+        task: 'FIX',
+        note: `杀青揉捻 · ${values.operator || '未署名'}`,
+        payload: { kind: 'FIX', draft: values },
+        onComplete: async () => {
+          setModalOpen(false);
+          setEditingFix(null);
+          await Promise.all([fixesTable.refresh(), loadBatches()]);
+          message.success('杀青揉捻记录已登记，批次工序状态已回写为「已杀青」');
+        },
+      });
     } catch (error) {
       message.error(error instanceof Error ? error.message : '杀青揉捻记录保存失败');
     }
@@ -156,8 +175,12 @@ export default function FixRecord() {
   };
 
   const markFixed = async (fix: Fix): Promise<void> => {
-    const nextState = await markBatchState(fix.batchId, '已杀青');
-    message.success(`批次工序状态：${nextState ?? '已是已杀青或更后道工序'}`);
+    try {
+      const nextState = await markBatchState(fix.batchId, '已杀青');
+      message.success(`批次工序状态：${nextState ?? '已是已杀青或更后道工序'}`);
+    } catch (error) {
+      message.warning(error instanceof Error ? error.message : '工序状态暂不能推进');
+    }
   };
 
   const columns: ColumnsType<Fix> = [
@@ -220,6 +243,15 @@ export default function FixRecord() {
       },
     },
     {
+      title: '调度名次 / 占用',
+      key: 'dispatch',
+      width: 210,
+      render: (_: unknown, row) => {
+        const summary = dispatchSummaryMap.get(row.batchId);
+        return summary ? <DispatchBadge summary={summary} /> : '—';
+      },
+    },
+    {
       title: '操作',
       key: 'action',
       width: 230,
@@ -260,6 +292,15 @@ export default function FixRecord() {
         </Space>
       </div>
 
+      {globalHeld.length > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`有 ${globalHeld.length} 个工位占用尚未确认（#${globalHeld[0].seq} 起）：占用确认前，批次工序状态与焙火安排不能越过当前工序`}
+        />
+      ) : null}
+
       <div className="stat-row">
         <StatBadge label="记录数" value={stats.count} suffix={`/ ${fixesTable.count}`} tone="primary" />
         <StatBadge label="平均锅温" value={stats.avgWokTemp} suffix="℃" tone="warning" />
@@ -293,14 +334,14 @@ export default function FixRecord() {
         />
       ) : (
         <Card className="panel-card" loading={fixesTable.loading}>
-          <Table<Fix> rowKey="id" size="small" dataSource={rows} columns={columns} pagination={{ pageSize: 8 }} scroll={{ x: 1280 }} />
+          <Table<Fix> rowKey="id" size="small" dataSource={rows} columns={columns} pagination={{ pageSize: 8 }} scroll={{ x: 1480 }} />
         </Card>
       )}
 
       <Modal
         open={modalOpen}
         title={editingFix ? '编辑杀青揉捻记录' : '登记杀青揉捻'}
-        okText={editingFix ? '保存' : '登记并推进状态'}
+        okText={editingFix ? '保存' : '提交并占工位'}
         cancelText="取消"
         onCancel={() => {
           setModalOpen(false);

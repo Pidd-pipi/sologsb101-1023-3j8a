@@ -3,7 +3,7 @@
  * 维护焙火道次（多道次按序排列）、复焙提醒、足火判定（待焙→焙火中→已足火）与筛选条件。
  */
 import { create } from 'zustand';
-import { nextRoastState, type Roast, type RoastDraft, type RoastReminder, type RoastState } from '../types/roast';
+import { ROAST_STATES, nextRoastState, type Roast, type RoastDraft, type RoastReminder, type RoastState } from '../types/roast';
 import type { Batch } from '../types/batch';
 import type { Garden } from '../types/garden';
 import {
@@ -19,6 +19,8 @@ import {
 import { buildReminder, fireLevelOf, fireLoadOf } from '../utils/tea';
 import { emptyFilterValue, matchKeyword, pickedIncludes, pickedSelect, type FilterValue } from '../components/common/FilterBar';
 import { useBatchStore } from './batchStore';
+import { db } from '../utils/db';
+import { assertNoUnconfirmedHold } from '../utils/dispatchViews';
 
 /** 焙火页筛选条件默认值：关键字 + 批次 / 道次状态 / 炭种 / 山场四个下拉多选 */
 export const DEFAULT_ROAST_FILTERS: FilterValue = emptyFilterValue(['batchIds', 'states', 'charcoals', 'gardenIds']);
@@ -112,6 +114,11 @@ export const useRoastStore = create<RoastStoreState>((set, get) => ({
   async updateRoast(roastId, draft) {
     const existing = get().roasts.find((roast) => roast.id === roastId);
     if (!existing) return;
+    // 工序闸门：通过编辑表单把道次状态向后推进时，同样要求没有未确认的工位占用
+    if (ROAST_STATES.indexOf(draft.state) > ROAST_STATES.indexOf(existing.state)) {
+      const orders = await db.dispatchOrders.toArray();
+      assertNoUnconfirmedHold(orders);
+    }
     const next: Roast = {
       ...existing,
       tempC: draft.tempC,
@@ -141,6 +148,9 @@ export const useRoastStore = create<RoastStoreState>((set, get) => ({
     if (!existing) return null;
     const next = nextRoastState(existing.state);
     if (!next) return null;
+    // 工序闸门：存在未确认的工位占用时，焙火道次不得越过当前工序
+    const orders = await db.dispatchOrders.toArray();
+    assertNoUnconfirmedHold(orders);
     await putRoast({ ...existing, state: next, updatedAt: nowIso() });
     if (next === '已足火') {
       // 足火判定通过：批次工序推进到「已焙火」

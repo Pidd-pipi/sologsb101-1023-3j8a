@@ -19,6 +19,7 @@ import type { Garden } from '../types/garden';
 import {
   ID_PREFIX,
   createId,
+  db,
   listBatches,
   listFixes,
   listReviews,
@@ -26,6 +27,7 @@ import {
   putBatch,
   removeBatch as removeBatchRow,
 } from '../utils/db';
+import { assertNoUnconfirmedHold } from '../utils/dispatchViews';
 import { batchLabel, matchScoreBand, roundTo } from '../utils/tea';
 import { emptyFilterValue, matchKeyword, pickedIncludes, pickedSelect, type FilterValue } from '../components/common/FilterBar';
 
@@ -257,6 +259,11 @@ export const useBatchStore = create<BatchStoreState>((set, get) => ({
   async updateBatch(batchId, draft) {
     const existing = get().batches.find((item) => item.id === batchId);
     if (!existing) return;
+    // 工序闸门：通过编辑表单把工序状态向后推进时，同样要求没有未确认的工位占用
+    if (batchStateOrder(draft.state) > batchStateOrder(existing.state)) {
+      const orders = await db.dispatchOrders.toArray();
+      assertNoUnconfirmedHold(orders);
+    }
     const next: Batch = {
       ...existing,
       gardenId: draft.gardenId,
@@ -290,6 +297,9 @@ export const useBatchStore = create<BatchStoreState>((set, get) => ({
     const batch = get().batches.find((item) => item.id === batchId);
     if (!batch) return null;
     if (batchStateOrder(target) <= batchStateOrder(batch.state)) return batch.state;
+    // 工序闸门：存在未确认的工位占用时，批次状态不得越过当前工序
+    const orders = await db.dispatchOrders.toArray();
+    assertNoUnconfirmedHold(orders);
     const next: Batch = { ...batch, state: target, updatedAt: nowIso() };
     await putBatch(next);
     await get().loadBatches();
